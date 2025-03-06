@@ -1,0 +1,10 @@
+cradle:
+  cabal:
+    - path: "./src"
+      component: "stun-hs:lib"
+
+    - path: "./app/Main.hs"
+      component: "stun-hs:exe:stun-hs-exe"
+
+    - path: "./test"
+      component: "stun-hs:test:stun-hs-test"
