@@ -26,6 +26,9 @@ source-repository head
 library
   exposed-modules:
       Lib
+    , Network.STUN.Types
+    , Network.STUN.Binary
+    , Network.STUN.Message
   other-modules:
       Paths_stun_hs
   autogen-modules:
@@ -35,6 +38,10 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       base >=4.7 && <5
+    , network
+    , text
+    , bytestring
+    , cereal
   default-language: Haskell2010
 
 executable stun-hs-exe
@@ -55,6 +62,7 @@ test-suite stun-hs-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      Network.STUN.BinarySpec
       Paths_stun_hs
   autogen-modules:
       Paths_stun_hs
@@ -64,4 +72,8 @@ test-suite stun-hs-test
   build-depends:
       base >=4.7 && <5
     , stun-hs
+    , hspec
+    , QuickCheck
+    , bytestring
+    , cereal
   default-language: Haskell2010
