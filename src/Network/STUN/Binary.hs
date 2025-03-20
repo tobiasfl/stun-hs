@@ -10,12 +10,12 @@ import qualified Network.STUN.Types as Types
 
 import Data.Bits
 import Data.Word
-import Data.Serialize 
---import Debug.Trace (trace)
-import Control.Monad 
+import Data.Serialize
+import Control.Monad
 import qualified Data.ByteString as BS
 import Network.Socket (PortNumber, HostAddress6)
 import Control.Applicative
+import qualified Data.Text.Encoding as TE
 
 --     https://datatracker.ietf.org/doc/html/rfc8489
 --
@@ -71,6 +71,16 @@ getMessageTypeField = do
           0x0001 -> pure (classField, Binding)
           _ -> fail "Invalid method or not implemented"
 
+putMessageTypeField :: Types.MessageType -> Put
+putMessageTypeField msgType = putWord16be $ setMethodField $ setClassField 0x0000
+    where setClassField word = let c0 = 4
+                                   c1 = 8
+                                    in case msgType of
+                                      Types.BindingRequest -> word
+                                      Types.BindingSuccessResponse -> setBit word c1
+                                      Types.BindingErrorResponse -> foldl setBit word [c0, c1]
+          setMethodField = let m0 = 0 in (`setBit` m0)
+
 magicCookie :: Word32
 magicCookie = 0x2112A442
 
@@ -84,10 +94,8 @@ getHostAddress6 = do
       [a, b, c, d] -> pure (a, b, c, d)
       _ -> fail "HostAddress6 of invalid length"
 
-getMappedAddres :: Get Types.Attribute
-getMappedAddres = do
-    attributeType <- getWord16be
-    when (attributeType /= 0x0001) $ fail "Invalid attribute type"
+getMappedAddressVal :: Get (PortNumber, Types.Address)
+getMappedAddressVal = do
     lengthInBytes <- getWord16be
     when (((fromIntegral lengthInBytes `mod` 4) :: Int) /= 0) $ fail "Attribute length not 32-bit aligned"
     guard (lengthInBytes `elem` [8, 20])
@@ -98,34 +106,84 @@ getMappedAddres = do
                  0x01 -> Types.IPv4 <$> getWord32be
                  0x02 -> Types.IPv6 <$> getHostAddress6
                  _ -> fail "Invalid address family"
+    pure (port, address)
 
-    pure $ Types.MappedAddress port address 
+getMappedAddres :: Get Types.Attribute
+getMappedAddres = do
+    attributeType <- getWord16be
+    when (attributeType /= 0x0001) $ fail "Invalid attribute type"
+    (port, address) <- getMappedAddressVal
+    pure $ Types.MappedAddress port address
 
 getXORMappedAddres :: Get Types.Attribute
 getXORMappedAddres = do
     attributeType <- getWord16be
     when (attributeType /= 0x0020) $ fail "Invalid attribute type"
+    (port, address) <- getMappedAddressVal
+    pure $ Types.XORMappedAddress port address
+
+getErrorCode :: Get Types.Attribute
+getErrorCode = do
+    attributeType <- getWord16be
+    when (attributeType /= 0x0009) $ fail "Invalid attribute type"
     lengthInBytes <- getWord16be
     when (((fromIntegral lengthInBytes `mod` 4) :: Int) /= 0) $ fail "Attribute length not 32-bit aligned"
-    guard (lengthInBytes `elem` [8, 20])
-    getWord8 >>= guard . (== 0x00)
-    addrFamilyByte <- getWord8
-    port <- getPort
-    address <- case addrFamilyByte of
-                 0x01 -> Types.IPv4 <$> getWord32be
-                 0x02 -> Types.IPv6 <$> getHostAddress6
-                 _ -> fail "Invalid address family"
-
-    pure $ Types.XORMappedAddress port address 
+    skip 2
+    errCodeHundredsDigit <- (0x07 .&.) <$> getWord8
+    unless (errCodeHundredsDigit `elem` [3..6]) $ fail "Error code must be between 300-600"
+    number <- (`mod` 100) <$> getWord8
+    reasonPhrase <- TE.decodeUtf8 <$> getByteString (fromIntegral lengthInBytes - 4)
+    let (errCodeNumber :: Int) = (fromIntegral errCodeHundredsDigit * 100) + fromIntegral number
+    errCode <- case errCodeNumber of
+                 300 -> pure Types.TryAlternate300
+                 400 -> pure Types.BadRequest400
+                 401 -> pure Types.Unauthenticated401
+                 420 -> pure Types.UnknownAttribute420
+                 438 -> pure Types.StaleNonce438
+                 500 -> pure Types.ServerError500
+                 _ -> fail "Error code invalid or not implemented"
+    pure $ Types.ErrorCode errCode reasonPhrase
 
 getAttribute :: Get Types.Attribute
 getAttribute = do
-    getMappedAddres <|> getXORMappedAddres
+    getMappedAddres <|> getXORMappedAddres <|> getErrorCode
+
+w32ToBSBE :: Word32 -> BS.StrictByteString
+w32ToBSBE w = runPut $ putWord32be w
+
+w16ToBSBE :: Word16 -> BS.StrictByteString
+w16ToBSBE w = runPut $ putWord16be w
+
+addressToByteString :: (Types.Address, PortNumber) -> BS.StrictByteString
+addressToByteString (Types.IPv4 addr, port) = BS.pack [0x00, 0x01] <> w16ToBSBE (fromIntegral port) <> encode addr
+addressToByteString (Types.IPv6 (a, b, c, d), port) = BS.pack [0x00, 0x02] <> w16ToBSBE (fromIntegral port) <> (BS.concat $ fmap w32ToBSBE  [a, b, c, d] :: BS.StrictByteString)
+
+attributeToByteString :: Types.Attribute -> BS.StrictByteString
+attributeToByteString (Types.ErrorCode code reason) = BS.pack [0x00, 0x09] <> w16ToBSBE (fromIntegral (BS.length val)) <> val
+    where val = BS.pack ([0x00, 0x00] <> [0x07 .&. hundreds, num]) <> TE.encodeUtf8 reason
+          (hundreds, num) = case code of
+                              Types.TryAlternate300 -> (3, 0)
+                              Types.BadRequest400 -> (4, 0)
+                              Types.Unauthenticated401 -> (4, 1)
+                              Types.UnknownAttribute420 -> (4, 20)
+                              Types.StaleNonce438 -> (4, 38)
+                              Types.ServerError500 -> (5, 0)
+attributeToByteString mappedAddr = case mappedAddr of
+                                     (Types.MappedAddress port addr) -> BS.pack [0x00, 0x01] <> lenAndBody (addr, port)
+                                     (Types.XORMappedAddress port addr) -> BS.pack [0x00, 0x20] <> lenAndBody (addr, port)
+                                 where lenAndBody portAndAddr = let val = addressToByteString portAndAddr in w16ToBSBE (fromIntegral (BS.length val)) <> val
 
 data Message = Message Types.MessageType Types.TransactionId [Types.Attribute]
 
 instance Serialize Message where
-    put = undefined
+    put (Message msgType (Types.TransactionId tid) attributes) = do
+        putMessageTypeField msgType
+        let attributesBytesTring = BS.concat $ fmap attributeToByteString attributes
+        putWord16be $ fromIntegral $ BS.length attributesBytesTring
+        putWord32be magicCookie
+        putByteString tid
+        putByteString attributesBytesTring
+
     get = do
         msgTypeFields <- getMessageTypeField
         msgType <- case msgTypeFields of
@@ -139,11 +197,20 @@ instance Serialize Message where
         tid <- getByteString 12
         remainingByteLen <- remaining
         when (remainingByteLen /= fromIntegral msgLength) $ fail "Invalid length"
-        attributes <- if remainingByteLen > 0 then replicateM 1 getAttribute else pure []
-        pure $ Message msgType (Types.TransactionId tid) attributes
+        attributes <- getAttributesUntilEnd [] remainingByteLen
+        
+        pure $ Message msgType (Types.TransactionId tid) (reverse attributes)
+            where getAttributesUntilEnd attrs remainingBytes  
+                    | remainingBytes > 0 = do
+                        a <- getAttribute
+                        r <- remaining
+                        getAttributesUntilEnd (a:attrs) r
+                    | remainingBytes == 0 = pure attrs
+                    | otherwise = fail "Failed to get attributes"
+
 
 serializeMessage :: Types.Message -> BS.StrictByteString
-serializeMessage = undefined
+serializeMessage msg = encode ((Message <$> Types.msgType <*> Types.transactionId <*> Types.attributes) msg)
 
 deserializeMessage :: BS.StrictByteString -> Either String Types.Message
 deserializeMessage bs = decode bs >>= \(Message msgType tid attrs) -> pure $ Types.mkMessage msgType tid attrs

@@ -7,11 +7,15 @@ module Network.STUN.Types
     , MessageType(..)
     , TransactionId(..)
     , Address(..)
-    , Attribute(..))
+    , Attribute(..)
+    , ErrCode(..)
+    , mkMappedAddress
+    , mkXORMappedAddress
+    , mkErrorCode)
     where
 
 import Network.Socket (PortNumber, HostAddress, HostAddress6)
---import qualified Data.Text as T
+import qualified Data.Text as T
 import qualified Data.ByteString as BS
 --import qualified Data.Text.Encoding as TE
 --import Data.Text.Encoding.Error (lenientDecode)
@@ -25,7 +29,7 @@ data MessageType =
     BindingRequest
   | BindingSuccessResponse
   | BindingErrorResponse
-  deriving (Eq, Show)
+  deriving (Eq, Show, Enum, Bounded)
 
 data Address = IPv4 HostAddress | IPv6 HostAddress6
     deriving (Eq, Show)
@@ -50,26 +54,35 @@ data ErrCode =
   | UnknownAttribute420
   | StaleNonce438
   | ServerError500
-  deriving (Eq, Show)
+  deriving (Eq, Show, Enum, Bounded)
 
 data Attribute =
     MappedAddress PortNumber Address
   | XORMappedAddress PortNumber Address
 --  | UserName OpaqueString
 --  | UserHash
-  | MessageIntegrity
-  | MessageIntegritySHA256
-  | FingerPrint
-  | ErrorCode ErrCode
+--  | MessageIntegrity
+--  | MessageIntegritySHA256
+--  | FingerPrint
+  | ErrorCode ErrCode T.Text
 --  | Realm
-  | Nonce
+--  | Nonce
 --  | PasswordAlgorithms
 --  | PasswordAlgorithm
-  | UnknownAttributes
+--  | UnknownAttributes
 --  | Software
 --  | AlternateServer
 --  | AlternateDomain
     deriving (Eq, Show)
+
+mkMappedAddress :: PortNumber -> Address -> Attribute
+mkMappedAddress = MappedAddress
+
+mkXORMappedAddress :: PortNumber -> Address -> Attribute
+mkXORMappedAddress = XORMappedAddress
+
+mkErrorCode :: ErrCode -> T.Text -> Attribute
+mkErrorCode = ErrorCode
 
 data Message = Message
     { msgType :: MessageType
