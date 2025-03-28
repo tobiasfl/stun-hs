@@ -25,10 +25,13 @@ source-repository head
 
 library
   exposed-modules:
-      Lib
-    , Network.STUN.Types
+    Network.STUN.Types
     , Network.STUN.Binary
-    , Network.STUN.Message
+    , Network.STUN.Server.Config
+    , Network.STUN.Server.Core
+    , Network.STUN
+    , Network.STUN.Server.Env
+    , Network.STUN.Server.Socket
   other-modules:
       Paths_stun_hs
   autogen-modules:
@@ -42,6 +45,8 @@ library
     , text
     , bytestring
     , cereal
+    , containers
+    , mtl
   default-language: Haskell2010
 
 executable stun-hs-exe
@@ -63,6 +68,7 @@ test-suite stun-hs-test
   main-is: Spec.hs
   other-modules:
       Network.STUN.BinarySpec
+      , Network.STUN.Server.CoreSpec
       Paths_stun_hs
   autogen-modules:
       Paths_stun_hs
@@ -76,4 +82,5 @@ test-suite stun-hs-test
     , QuickCheck
     , bytestring
     , cereal
+    , network
   default-language: Haskell2010

@@ -11,16 +11,15 @@ module Network.STUN.Types
     , ErrCode(..)
     , mkMappedAddress
     , mkXORMappedAddress
-    , mkErrorCode)
+    , mkErrorCode
+    , mkAddress
+    , mkIPv4Address
+    , mkIPv6Address)
     where
 
-import Network.Socket (PortNumber, HostAddress, HostAddress6)
+import qualified Network.Socket  as S
 import qualified Data.Text as T
 import qualified Data.ByteString as BS
---import qualified Data.Text.Encoding as TE
---import Data.Text.Encoding.Error (lenientDecode)
---import Data.Either (either)
---import Data.Bifunctor (first)
 
 newtype TransactionId = TransactionId BS.ByteString
     deriving (Eq, Show)
@@ -31,21 +30,19 @@ data MessageType =
   | BindingErrorResponse
   deriving (Eq, Show, Enum, Bounded)
 
-data Address = IPv4 HostAddress | IPv6 HostAddress6
+data Address = IPv4 S.PortNumber S.HostAddress | IPv6 S.PortNumber S.HostAddress6
     deriving (Eq, Show)
 
---newtype OpaqueString = OpaqueString { unOpaqueString :: T.Text }
---  deriving (Eq, Show)
---
---toWireFormat :: OpaqueString -> BS.StrictByteString
---toWireFormat = TE.encodeUtf8 . unOpaqueString
---
---mkOpaqueString :: BS.ByteString -> Int -> Either String OpaqueString
---mkOpaqueString bs maxLength
---    | T.null text = Left "OpaqueString cannot be empty"
---    | BS.length bs > maxLength = Left "OpaqueString too long"
---    | otherwise = Right (OpaqueString text)
---    where text = TE.decodeUtf8With lenientDecode bs
+mkAddress :: S.SockAddr -> Maybe Address
+mkAddress (S.SockAddrInet port hostAddr) = Just $ IPv4 port hostAddr
+mkAddress (S.SockAddrInet6 port _ hostAddr _) = Just $ IPv6 port hostAddr
+mkAddress _ = Nothing
+
+mkIPv4Address :: S.PortNumber -> S.HostAddress -> Address
+mkIPv4Address = IPv4
+
+mkIPv6Address :: S.PortNumber -> S.HostAddress6 -> Address
+mkIPv6Address = IPv6
 
 data ErrCode =
     TryAlternate300
@@ -57,8 +54,8 @@ data ErrCode =
   deriving (Eq, Show, Enum, Bounded)
 
 data Attribute =
-    MappedAddress PortNumber Address
-  | XORMappedAddress PortNumber Address
+    MappedAddress Address
+  | XORMappedAddress Address
 --  | UserName OpaqueString
 --  | UserHash
 --  | MessageIntegrity
@@ -75,10 +72,10 @@ data Attribute =
 --  | AlternateDomain
     deriving (Eq, Show)
 
-mkMappedAddress :: PortNumber -> Address -> Attribute
+mkMappedAddress :: Address -> Attribute
 mkMappedAddress = MappedAddress
 
-mkXORMappedAddress :: PortNumber -> Address -> Attribute
+mkXORMappedAddress :: Address -> Attribute
 mkXORMappedAddress = XORMappedAddress
 
 mkErrorCode :: ErrCode -> T.Text -> Attribute

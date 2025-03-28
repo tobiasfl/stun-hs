@@ -55,13 +55,12 @@ newtype ArbitraryAttribute = Attr {unwrap :: Types.Attribute}
 instance Arbitrary ArbitraryAttribute where
   arbitrary = Attr <$> oneof [mappedAddressGen, errorCodeGen]
     where portGen = arbitraryBoundedEnum
-          ipv4AddressGen = Types.IPv4 <$> arbitrary
-          ipv6AddressGen = Types.IPv6 <$> arbitrary
+          ipv4AddressGen = Types.IPv4 <$> portGen <*> arbitrary
+          ipv6AddressGen = Types.IPv6 <$> portGen <*> arbitrary
           mappedAddressGen = do
               ctor <- elements [Types.MappedAddress, Types.XORMappedAddress]
-              port <- portGen
               addr <- oneof [ipv4AddressGen, ipv6AddressGen]
-              pure $ ctor port addr
+              pure $ ctor addr
           errorCodeGen = Types.ErrorCode <$> arbitraryBoundedEnum <*> pure ""
 
 newtype ArbitraryMessage = Msg Types.Message
@@ -100,11 +99,11 @@ spec = do
     context "When decoding a STUN bind success response with attributes" $ do
       it "Decodes a MappedAddress with IPv4 address attribute correctly" $ do
         let msg = Binary.deserializeMessage $ stunBindSuccessResponse 12 <> mappedAddressAttribute
-        let expectedAttribute = Types.mkMappedAddress 4604 $ Types.IPv4 0x46c7802e
+        let expectedAttribute = Types.mkMappedAddress $ Types.IPv4 4604  0x46c7802e
         Types.attributes <$> msg `shouldBe` Right [expectedAttribute]
       it "Decodes an XORMappedAddress with IPv6 address attribute correctly" $ do
         let msg = Binary.deserializeMessage $ stunBindSuccessResponse 24 <> xorMappedAddressAttribute
-        let expectedAttribute = Types.mkXORMappedAddress 4604 $ Types.IPv6 (0x46c7802e, 0x46c7802e, 0x46c7802e, 0x462ec780)
+        let expectedAttribute = Types.mkXORMappedAddress $ Types.IPv6 4604 (0x46c7802e, 0x46c7802e, 0x46c7802e, 0x462ec780)
         Types.attributes <$> msg `shouldBe` Right [expectedAttribute]
     it "Decodes a STUN bind error response correctly" $ do
       let msg = Binary.deserializeMessage $ stunBindErrorResponse 0
@@ -129,7 +128,7 @@ spec = do
       it "Encodes an XORMappedAddress with IPV4 address and a Unauthenticated401 error correctly" $ do
         let tid = BS.pack [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01]
         let errCodeAttr = Types.mkErrorCode Types.Unauthenticated401 ""
-        let msg = Types.mkMessage Types.BindingSuccessResponse (Types.TransactionId tid) [Types.mkXORMappedAddress 4604 $ Types.IPv4 0x46c7802e, errCodeAttr]
+        let msg = Types.mkMessage Types.BindingSuccessResponse (Types.TransactionId tid) [Types.mkXORMappedAddress $ Types.IPv4 4604 0x46c7802e, errCodeAttr]
         let result = Binary.serializeMessage msg
         let xorMappedAttr = BS.pack [0x00, 0x20, 0x00, 0x08, 0x00, 0x01, 0x11, 0xfc, 0x46, 0xc7, 0x80, 0x2e]
         result `shouldBe` BS.pack [
@@ -139,7 +138,7 @@ spec = do
         Binary.deserializeMessage result `shouldBe` Right msg
       it "Encodes an XORMappedAddress with IPV4 address correctly" $ do
         let tid = BS.pack [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01]
-        let msg = Types.mkMessage Types.BindingSuccessResponse (Types.TransactionId tid) [Types.mkXORMappedAddress 4604 $ Types.IPv4 0x46c7802e]
+        let msg = Types.mkMessage Types.BindingSuccessResponse (Types.TransactionId tid) [Types.mkXORMappedAddress $ Types.IPv4 4604 0x46c7802e]
         let result = Binary.serializeMessage msg
         let xorMappedAttr = BS.pack [0x00, 0x20, 0x00, 0x08, 0x00, 0x01, 0x11, 0xfc, 0x46, 0xc7, 0x80, 0x2e]
         result `shouldBe` BS.pack [
@@ -162,3 +161,24 @@ spec = do
 
     prop "All encoded STUN messages are 32-bit aligned" $
         \(Msg msg) -> BS.length (Binary.serializeMessage msg) `mod` 4 == 0
+
+  describe "XOR'ing IPv4 addresses" $ do
+    context "When the port and address are equal to the magic cookie" $ do
+      it "XOR's both the port and address to 0" $ do
+        let tid = Types.TransactionId $ BS.pack [0x01, 0x01, 0x15, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01]
+        let address = Types.mkIPv4Address 0x2112 0x2112A442
+        let result = Binary.xorAddress tid address
+        result `shouldBe` Types.mkIPv4Address 0x0 0x0
+    context "When the port and address are the complement of the magic cookie" $ do
+      it "XOR's both the port and address so all bits are set" $ do
+        let tid = Types.TransactionId $ BS.pack [0x01, 0x01, 0x15, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01]
+        let address = Types.mkIPv4Address 0xdeed 0xDEED5BBD
+        let result = Binary.xorAddress tid address
+        result `shouldBe` Types.mkIPv4Address 0xffff 0xffffffff
+  describe "XOR'ing IPv6 addresses" $ do
+    context "When the address is equal to the magic cookie concatenated with the transaction id" $ do
+      it "XOR's the address to 0" $ do
+        let tid = Types.TransactionId $ BS.pack [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c]
+        let address = Types.mkIPv6Address 0x2112 (0x2112A442, 0x01020304, 0x05060708, 0x090a0b0c)
+        let result = Binary.xorAddress tid address
+        result `shouldBe` Types.mkIPv6Address 0x0 (0x0, 0x0, 0x0, 0x0)

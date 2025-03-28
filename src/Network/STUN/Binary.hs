@@ -3,7 +3,8 @@
 
 module Network.STUN.Binary
     (serializeMessage
-    , deserializeMessage)
+    , deserializeMessage
+    , xorAddress)
     where
 
 import qualified Network.STUN.Types as Types
@@ -11,9 +12,10 @@ import qualified Network.STUN.Types as Types
 import Data.Bits
 import Data.Word
 import Data.Serialize
+import Data.Either
 import Control.Monad
 import qualified Data.ByteString as BS
-import Network.Socket (PortNumber, HostAddress6)
+import Network.Socket (PortNumber, HostAddress6, HostAddress)
 import Control.Applicative
 import qualified Data.Text.Encoding as TE
 
@@ -94,7 +96,7 @@ getHostAddress6 = do
       [a, b, c, d] -> pure (a, b, c, d)
       _ -> fail "HostAddress6 of invalid length"
 
-getMappedAddressVal :: Get (PortNumber, Types.Address)
+getMappedAddressVal :: Get Types.Address
 getMappedAddressVal = do
     lengthInBytes <- getWord16be
     when (((fromIntegral lengthInBytes `mod` 4) :: Int) /= 0) $ fail "Attribute length not 32-bit aligned"
@@ -102,25 +104,22 @@ getMappedAddressVal = do
     getWord8 >>= guard . (== 0x00)
     addrFamilyByte <- getWord8
     port <- getPort
-    address <- case addrFamilyByte of
-                 0x01 -> Types.IPv4 <$> getWord32be
-                 0x02 -> Types.IPv6 <$> getHostAddress6
+    case addrFamilyByte of
+                 0x01 -> Types.IPv4 port <$> getWord32be
+                 0x02 -> Types.IPv6 port <$> getHostAddress6
                  _ -> fail "Invalid address family"
-    pure (port, address)
 
 getMappedAddres :: Get Types.Attribute
 getMappedAddres = do
     attributeType <- getWord16be
     when (attributeType /= 0x0001) $ fail "Invalid attribute type"
-    (port, address) <- getMappedAddressVal
-    pure $ Types.MappedAddress port address
+    Types.MappedAddress <$> getMappedAddressVal
 
 getXORMappedAddres :: Get Types.Attribute
 getXORMappedAddres = do
     attributeType <- getWord16be
     when (attributeType /= 0x0020) $ fail "Invalid attribute type"
-    (port, address) <- getMappedAddressVal
-    pure $ Types.XORMappedAddress port address
+    Types.XORMappedAddress <$> getMappedAddressVal
 
 getErrorCode :: Get Types.Attribute
 getErrorCode = do
@@ -154,9 +153,9 @@ w32ToBSBE w = runPut $ putWord32be w
 w16ToBSBE :: Word16 -> BS.StrictByteString
 w16ToBSBE w = runPut $ putWord16be w
 
-addressToByteString :: (Types.Address, PortNumber) -> BS.StrictByteString
-addressToByteString (Types.IPv4 addr, port) = BS.pack [0x00, 0x01] <> w16ToBSBE (fromIntegral port) <> encode addr
-addressToByteString (Types.IPv6 (a, b, c, d), port) = BS.pack [0x00, 0x02] <> w16ToBSBE (fromIntegral port) <> (BS.concat $ fmap w32ToBSBE  [a, b, c, d] :: BS.StrictByteString)
+addressToByteString :: Types.Address -> BS.StrictByteString
+addressToByteString (Types.IPv4 port addr) = BS.pack [0x00, 0x01] <> w16ToBSBE (fromIntegral port) <> encode addr
+addressToByteString (Types.IPv6 port (a, b, c, d)) = BS.pack [0x00, 0x02] <> w16ToBSBE (fromIntegral port) <> (BS.concat $ fmap w32ToBSBE  [a, b, c, d] :: BS.StrictByteString)
 
 attributeToByteString :: Types.Attribute -> BS.StrictByteString
 attributeToByteString (Types.ErrorCode code reason) = BS.pack [0x00, 0x09] <> w16ToBSBE (fromIntegral (BS.length val)) <> val
@@ -169,9 +168,9 @@ attributeToByteString (Types.ErrorCode code reason) = BS.pack [0x00, 0x09] <> w1
                               Types.StaleNonce438 -> (4, 38)
                               Types.ServerError500 -> (5, 0)
 attributeToByteString mappedAddr = case mappedAddr of
-                                     (Types.MappedAddress port addr) -> BS.pack [0x00, 0x01] <> lenAndBody (addr, port)
-                                     (Types.XORMappedAddress port addr) -> BS.pack [0x00, 0x20] <> lenAndBody (addr, port)
-                                 where lenAndBody portAndAddr = let val = addressToByteString portAndAddr in w16ToBSBE (fromIntegral (BS.length val)) <> val
+                                     (Types.MappedAddress addr) -> BS.pack [0x00, 0x01] <> lenAndBody addr
+                                     (Types.XORMappedAddress addr) -> BS.pack [0x00, 0x20] <> lenAndBody addr
+                                 where lenAndBody addr = let val = addressToByteString addr in w16ToBSBE (fromIntegral (BS.length val)) <> val
 
 data Message = Message Types.MessageType Types.TransactionId [Types.Attribute]
 
@@ -198,9 +197,8 @@ instance Serialize Message where
         remainingByteLen <- remaining
         when (remainingByteLen /= fromIntegral msgLength) $ fail "Invalid length"
         attributes <- getAttributesUntilEnd [] remainingByteLen
-        
         pure $ Message msgType (Types.TransactionId tid) (reverse attributes)
-            where getAttributesUntilEnd attrs remainingBytes  
+            where getAttributesUntilEnd attrs remainingBytes
                     | remainingBytes > 0 = do
                         a <- getAttribute
                         r <- remaining
@@ -214,3 +212,23 @@ serializeMessage msg = encode ((Message <$> Types.msgType <*> Types.transactionI
 
 deserializeMessage :: BS.StrictByteString -> Either String Types.Message
 deserializeMessage bs = decode bs >>= \(Message msgType tid attrs) -> pure $ Types.mkMessage msgType tid attrs
+
+xorPortNumber :: PortNumber -> PortNumber
+xorPortNumber port = fromIntegral $ toInteger port `xor` (toInteger magicCookie `shiftR` 16)
+
+xorHostAddress :: HostAddress -> HostAddress
+xorHostAddress addr = fromIntegral $ toInteger addr `xor` toInteger magicCookie
+
+bSBEToW32 :: BS.StrictByteString -> Word32
+bSBEToW32 bs = fromRight 0 $ runGet getWord32be bs
+
+xorHostAddress6 :: Types.TransactionId -> HostAddress6 -> HostAddress6
+xorHostAddress6 (Types.TransactionId tid) (a, b, c, d) = (a `xor` magicCookie, xorB, xorC, xorD)
+    where bcdXor = BS.zipWith xor (BS.concat $ fmap w32ToBSBE [b, c, d]) tid
+          xorB = bSBEToW32 $ BS.pack bcdXor
+          xorC = bSBEToW32 $ BS.pack $ drop 4 bcdXor
+          xorD = bSBEToW32 $ BS.pack $ drop 8 bcdXor
+
+xorAddress :: Types.TransactionId -> Types.Address -> Types.Address
+xorAddress _ (Types.IPv4 port addr) = Types.IPv4 (xorPortNumber port) (xorHostAddress addr)
+xorAddress tid (Types.IPv6 port addr) = Types.IPv6 (xorPortNumber port) (xorHostAddress6 tid addr)

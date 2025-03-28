@@ -1,6 +1,6 @@
 module Main (main) where
 
-import Lib
+import qualified Network.STUN as STUN
 
 main :: IO ()
-main = someFunc
+main = STUN.run STUN.defaultEnv
