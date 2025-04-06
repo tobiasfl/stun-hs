@@ -99,7 +99,6 @@ getHostAddress6 = do
 getMappedAddressVal :: Get Types.Address
 getMappedAddressVal = do
     lengthInBytes <- getWord16be
-    when (((fromIntegral lengthInBytes `mod` 4) :: Int) /= 0) $ fail "Attribute length not 32-bit aligned"
     guard (lengthInBytes `elem` [8, 20])
     getWord8 >>= guard . (== 0x00)
     addrFamilyByte <- getWord8
@@ -111,27 +110,23 @@ getMappedAddressVal = do
 
 getMappedAddres :: Get Types.Attribute
 getMappedAddres = do
-    attributeType <- getWord16be
-    when (attributeType /= 0x0001) $ fail "Invalid attribute type"
+    void (expect 0x0001 :: Get Word16)
     Types.MappedAddress <$> getMappedAddressVal
 
 getXORMappedAddres :: Get Types.Attribute
 getXORMappedAddres = do
-    attributeType <- getWord16be
-    when (attributeType /= 0x0020) $ fail "Invalid attribute type"
+    void (expect 0x0020 :: Get Word16)
     Types.XORMappedAddress <$> getMappedAddressVal
 
 getErrorCode :: Get Types.Attribute
 getErrorCode = do
-    attributeType <- getWord16be
-    when (attributeType /= 0x0009) $ fail "Invalid attribute type"
-    lengthInBytes <- getWord16be
-    when (((fromIntegral lengthInBytes `mod` 4) :: Int) /= 0) $ fail "Attribute length not 32-bit aligned"
+    void (expect 0x0009 :: Get Word16)
+    lengthInBytes <- fromIntegral <$> getWord16be
     skip 2
     errCodeHundredsDigit <- (0x07 .&.) <$> getWord8
     unless (errCodeHundredsDigit `elem` [3..6]) $ fail "Error code must be between 300-600"
     number <- (`mod` 100) <$> getWord8
-    reasonPhrase <- TE.decodeUtf8 <$> getByteString (fromIntegral lengthInBytes - 4)
+    reasonPhrase <- TE.decodeUtf8 <$> getByteString (lengthInBytes - 4)
     let (errCodeNumber :: Int) = (fromIntegral errCodeHundredsDigit * 100) + fromIntegral number
     errCode <- case errCodeNumber of
                  300 -> pure Types.TryAlternate300
@@ -141,11 +136,29 @@ getErrorCode = do
                  438 -> pure Types.StaleNonce438
                  500 -> pure Types.ServerError500
                  _ -> fail "Error code invalid or not implemented"
+    skipAttributePadding lengthInBytes
     pure $ Types.ErrorCode errCode reasonPhrase
+
+getUnknownAttributes :: Get Types.Attribute
+getUnknownAttributes = do
+    void (expect 0x000A :: Get Word16)
+    lengthInBytes <- fromIntegral <$> getWord16be
+    attributeTypes <- replicateM (lengthInBytes `div` 2) getWord16be
+    skipAttributePadding lengthInBytes
+    pure $ Types.UnknownAttributes attributeTypes
+
+getUnknownComprehensionRequired :: Get Types.Attribute
+getUnknownComprehensionRequired = do
+    attributeType <- getWord16be
+    unless (attributeType >= 0x0000 && attributeType <= 0x7FFF) $ fail "Invalid attribute type"
+    lengthInBytes <- fromIntegral <$> getWord16be
+    skip lengthInBytes
+    skipAttributePadding lengthInBytes
+    pure $ Types.UnknownComprehensionRequired attributeType
 
 getAttribute :: Get Types.Attribute
 getAttribute = do
-    getMappedAddres <|> getXORMappedAddres <|> getErrorCode
+    getMappedAddres <|> getXORMappedAddres <|> getErrorCode <|> getUnknownAttributes <|> getUnknownComprehensionRequired
 
 w32ToBSBE :: Word32 -> BS.StrictByteString
 w32ToBSBE w = runPut $ putWord32be w
@@ -157,6 +170,15 @@ addressToByteString :: Types.Address -> BS.StrictByteString
 addressToByteString (Types.IPv4 port addr) = BS.pack [0x00, 0x01] <> w16ToBSBE (fromIntegral port) <> encode addr
 addressToByteString (Types.IPv6 port (a, b, c, d)) = BS.pack [0x00, 0x02] <> w16ToBSBE (fromIntegral port) <> (BS.concat $ fmap w32ToBSBE  [a, b, c, d] :: BS.StrictByteString)
 
+attrPadding :: Int -> Int
+attrPadding len = if len `mod` 4 /= 0 then 4 - len `mod` 4 else 0
+
+skipAttributePadding :: Int -> Get ()
+skipAttributePadding attrLen = let pad = attrPadding attrLen in when (pad /= 0) $ skip pad
+
+addPadding :: BS.StrictByteString -> BS.StrictByteString
+addPadding bs = bs <> BS.pack (replicate (attrPadding $ BS.length bs) 0x00)
+
 attributeToByteString :: Types.Attribute -> BS.StrictByteString
 attributeToByteString (Types.ErrorCode code reason) = BS.pack [0x00, 0x09] <> w16ToBSBE (fromIntegral (BS.length val)) <> val
     where val = BS.pack ([0x00, 0x00] <> [0x07 .&. hundreds, num]) <> TE.encodeUtf8 reason
@@ -167,9 +189,12 @@ attributeToByteString (Types.ErrorCode code reason) = BS.pack [0x00, 0x09] <> w1
                               Types.UnknownAttribute420 -> (4, 20)
                               Types.StaleNonce438 -> (4, 38)
                               Types.ServerError500 -> (5, 0)
+attributeToByteString (Types.UnknownAttributes attributeTypes) = BS.pack [0x00, 0x0A] <> len <> BS.concat (fmap w16ToBSBE attributeTypes)
+    where len = w16ToBSBE $ fromIntegral $ length attributeTypes * 2
 attributeToByteString mappedAddr = case mappedAddr of
                                      (Types.MappedAddress addr) -> BS.pack [0x00, 0x01] <> lenAndBody addr
                                      (Types.XORMappedAddress addr) -> BS.pack [0x00, 0x20] <> lenAndBody addr
+                                     (Types.UnknownComprehensionRequired _) -> BS.empty
                                  where lenAndBody addr = let val = addressToByteString addr in w16ToBSBE (fromIntegral (BS.length val)) <> val
 
 data Message = Message Types.MessageType Types.TransactionId [Types.Attribute]
@@ -177,7 +202,7 @@ data Message = Message Types.MessageType Types.TransactionId [Types.Attribute]
 instance Serialize Message where
     put (Message msgType (Types.TransactionId tid) attributes) = do
         putMessageTypeField msgType
-        let attributesBytesTring = BS.concat $ fmap attributeToByteString attributes
+        let attributesBytesTring = BS.concat $ fmap (addPadding . attributeToByteString) attributes
         putWord16be $ fromIntegral $ BS.length attributesBytesTring
         putWord32be magicCookie
         putByteString tid
@@ -190,12 +215,13 @@ instance Serialize Message where
                         (SuccessResponse, Binding) -> pure Types.BindingSuccessResponse
                         (ErrorResponse, Binding) -> pure Types.BindingErrorResponse
                         (Indication, Binding) -> fail "Binding indication not implemented"
-        msgLength <- getWord16be
+        msgLength <- fromIntegral <$> getWord16be
+        when (((msgLength `mod` 4) :: Int) /= 0) $ fail "Message length not 32-bit aligned"
         cookie <- getWord32be
         when (cookie /= magicCookie) $ fail "Invalid magic cookie"
         tid <- getByteString 12
         remainingByteLen <- remaining
-        when (remainingByteLen /= fromIntegral msgLength) $ fail "Invalid length"
+        when (remainingByteLen /= msgLength) $ fail "Invalid length"
         attributes <- getAttributesUntilEnd [] remainingByteLen
         pure $ Message msgType (Types.TransactionId tid) (reverse attributes)
             where getAttributesUntilEnd attrs remainingBytes

@@ -20,6 +20,7 @@ module Network.STUN.Types
 import qualified Network.Socket  as S
 import qualified Data.Text as T
 import qualified Data.ByteString as BS
+import qualified Data.Word as W
 
 newtype TransactionId = TransactionId BS.ByteString
     deriving (Eq, Show)
@@ -66,10 +67,11 @@ data Attribute =
 --  | Nonce
 --  | PasswordAlgorithms
 --  | PasswordAlgorithm
---  | UnknownAttributes
+  | UnknownAttributes [W.Word16]
 --  | Software
 --  | AlternateServer
 --  | AlternateDomain
+  | UnknownComprehensionRequired W.Word16
     deriving (Eq, Show)
 
 mkMappedAddress :: Address -> Attribute

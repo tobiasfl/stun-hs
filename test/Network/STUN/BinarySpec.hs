@@ -10,6 +10,8 @@ import qualified Network.STUN.Types as Types
 import qualified Data.ByteString as BS
 import Data.Word (Word8)
 import Data.Either (fromLeft)
+import Data.Functor ((<&>))
+import qualified Data.Text as T
 
 magicCookie :: BS.StrictByteString
 magicCookie = BS.pack [0x21, 0x12, 0xa4, 0x42]
@@ -23,8 +25,8 @@ bindSuccess = BS.pack [0x01, 0x01]
 bindError :: BS.StrictByteString
 bindError = BS.pack [0x01, 0x11]
 
-stunBindRequest :: BS.StrictByteString
-stunBindRequest = bindRequest <> BS.pack [0x00, 0x00] <> magicCookie <>
+stunBindRequest :: Word8 -> BS.StrictByteString
+stunBindRequest len = bindRequest <> BS.pack [0x00, len] <> magicCookie <>
     BS.pack [0x53, 0x4f, 0x70, 0x43, 0x69, 0x69, 0x35, 0x4a, 0x66, 0x63, 0x31, 0x7a]
 
 stunBindRequestInvalidMagicCookie :: BS.StrictByteString
@@ -43,6 +45,9 @@ stunBindErrorResponse len = bindError <> BS.pack [0x00, len] <> magicCookie <>
 errorCode500Attribute :: BS.StrictByteString
 errorCode500Attribute = BS.pack [0x00, 0x09, 0x00, 0x10, 0x00, 0x00, 0x05, 0x00, 0x53, 0x45, 0x52, 0x56, 0x45, 0x52, 0x20, 0x45, 0x52, 0x52, 0x4f, 0x52]
 
+errorCode420Attribute :: BS.StrictByteString
+errorCode420Attribute = BS.pack [0x00, 0x09, 0x00, 0x04, 0x00, 0x00, 0x04, 0x14]
+
 mappedAddressAttribute :: BS.StrictByteString
 mappedAddressAttribute = BS.pack [0x00, 0x01, 0x00, 0x08, 0x00, 0x01, 0x11, 0xfc, 0x46, 0xc7, 0x80, 0x2e]
 
@@ -53,7 +58,7 @@ newtype ArbitraryAttribute = Attr {unwrap :: Types.Attribute}
     deriving (Eq, Show)
 
 instance Arbitrary ArbitraryAttribute where
-  arbitrary = Attr <$> oneof [mappedAddressGen, errorCodeGen]
+  arbitrary = Attr <$> oneof [mappedAddressGen, errorCodeGen, unknownAttributesGen]
     where portGen = arbitraryBoundedEnum
           ipv4AddressGen = Types.IPv4 <$> portGen <*> arbitrary
           ipv6AddressGen = Types.IPv6 <$> portGen <*> arbitrary
@@ -61,7 +66,9 @@ instance Arbitrary ArbitraryAttribute where
               ctor <- elements [Types.MappedAddress, Types.XORMappedAddress]
               addr <- oneof [ipv4AddressGen, ipv6AddressGen]
               pure $ ctor addr
-          errorCodeGen = Types.ErrorCode <$> arbitraryBoundedEnum <*> pure ""
+          errorCodeGen = Types.ErrorCode <$> arbitraryBoundedEnum <*> (arbitrary <&> T.pack)
+          unknownAttributesGen = Types.UnknownAttributes <$> listOf1 (choose (0x021, 0x7FFF))
+
 
 newtype ArbitraryMessage = Msg Types.Message
     deriving (Eq, Show)
@@ -78,9 +85,9 @@ instance Arbitrary ArbitraryMessage where
 
 spec :: Spec
 spec = do
-  describe "Binary encoding/decoding" $ do
+  describe "Message encoding/decoding" $ do
     it "Decodes a STUN bind request correctly" $ do
-      let msg = Binary.deserializeMessage stunBindRequest
+      let msg = Binary.deserializeMessage $ stunBindRequest 0x0
       let expectedTransactionId = Types.TransactionId $ BS.pack [ 0x53, 0x4f, 0x70, 0x43, 0x69, 0x69, 0x35, 0x4a, 0x66, 0x63, 0x31, 0x7a ]
       let expectedMsg = Types.mkMessage Types.BindingRequest expectedTransactionId []
       msg `shouldBe` Right expectedMsg
@@ -88,7 +95,7 @@ spec = do
       let msg = Binary.deserializeMessage stunBindRequestInvalidMagicCookie
       fromLeft "" msg `shouldContain` "Invalid magic cookie"
     it "Fails to decode when invalid length" $ do
-      let stunBindWithInvalidLength = bindRequest <> BS.pack [0x0f] <> BS.drop 3 stunBindRequest
+      let stunBindWithInvalidLength = stunBindRequest 0x10
       let msg = Binary.deserializeMessage stunBindWithInvalidLength
       fromLeft "" msg `shouldContain` "Invalid length"
     it "Decodes a STUN bind success response correctly" $ do
@@ -96,6 +103,19 @@ spec = do
       let expectedTransactionId = Types.TransactionId $ BS.pack [ 0x53, 0x4f, 0x70, 0x43, 0x69, 0x69, 0x35, 0x4a, 0x66, 0x63, 0x31, 0x7a ]
       Types.msgType <$> msg `shouldBe` Right Types.BindingSuccessResponse
       Types.transactionId <$> msg `shouldBe` Right expectedTransactionId
+    context "When decoding a STUN bind request with attributes" $ do
+      it "Decodes unknown attributes of type between 0x0000 and 0x7FFF as comprehension-required" $ do
+        let msg = Binary.deserializeMessage $ stunBindRequest 8 <> BS.pack [0x00, 0x2b, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]
+        let expectedAttribute = Types.UnknownComprehensionRequired 0x002b
+        Types.attributes <$> msg `shouldBe` Right [expectedAttribute]
+      it "Decodes comprehension-required attribute with padding correctly" $ do
+        let padding = BS.pack [0x00, 0x00]
+        let msg = Binary.deserializeMessage $ stunBindRequest 8 <> BS.pack [0x00, 0x2b, 0x00, 0x02, 0x01, 0x02] <> padding
+        let expectedAttribute = Types.UnknownComprehensionRequired 0x002b
+        Types.attributes <$> msg `shouldBe` Right [expectedAttribute]
+      it "Returns an error for a non-32 bit aligned unknown comprehension-required attribute" $ do
+        let msg = Binary.deserializeMessage $ stunBindRequest 9 <> BS.pack [0x00, 0x2b, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00]
+        fromLeft "" msg `shouldContain` "Message length not 32-bit aligned"
     context "When decoding a STUN bind success response with attributes" $ do
       it "Decodes a MappedAddress with IPv4 address attribute correctly" $ do
         let msg = Binary.deserializeMessage $ stunBindSuccessResponse 12 <> mappedAddressAttribute
@@ -115,6 +135,18 @@ spec = do
         let msg = Binary.deserializeMessage $ stunBindErrorResponse 20  <> errorCode500Attribute
         let expectedAttribute = Types.ErrorCode Types.ServerError500 "SERVER ERROR"
         Types.attributes <$> msg `shouldBe` Right [expectedAttribute]
+      it "Decodes a ErrorCode 500 with padding correctly" $ do
+        let padding = BS.pack [0x00]
+        let errCode500Attribute = BS.pack [0x00, 0x09, 0x00, 0x0F, 0x00, 0x00, 0x05, 0x00, 0x53, 0x45, 0x52, 0x56, 0x45, 0x52, 0x20, 0x45, 0x52, 0x52, 0x4f]
+        let msg = Binary.deserializeMessage $ stunBindErrorResponse 20  <> errCode500Attribute <> padding
+        let expectedAttribute = Types.ErrorCode Types.ServerError500 "SERVER ERRO"
+        Types.attributes <$> msg `shouldBe` Right [expectedAttribute]
+      it "Decodes a ErrorCode 420 with a list of unknown attributes types correctly" $ do
+        let padding = BS.pack [0x00, 0x00]
+        let attrLength = 0x06
+        let msg = Binary.deserializeMessage $ stunBindErrorResponse 20  <> errorCode420Attribute <> BS.pack [0x00, 0x0a, 0x00, attrLength, 0x7F, 0xFF, 0x6F, 0xFF, 0x05, 0xFF] <> padding
+        let expectedAttributes = [Types.ErrorCode Types.UnknownAttribute420 "", Types.UnknownAttributes [0x7FFF, 0x6FFF, 0x05FF]]
+        Types.attributes <$> msg `shouldBe` Right expectedAttributes
 
     it "Encodes a STUN bind success response correctly" $ do
       let tid = BS.pack [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01]
