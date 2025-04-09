@@ -69,6 +69,7 @@ test-suite stun-hs-test
   other-modules:
       Network.STUN.BinarySpec
       , Network.STUN.Server.CoreSpec
+      , Network.STUN.BinaryUtils
       Paths_stun_hs
   autogen-modules:
       Paths_stun_hs

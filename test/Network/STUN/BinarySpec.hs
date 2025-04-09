@@ -8,51 +8,15 @@ import Test.QuickCheck
 import qualified Network.STUN.Binary as Binary
 import qualified Network.STUN.Types as Types
 import qualified Data.ByteString as BS
-import Data.Word (Word8)
 import Data.Either (fromLeft)
 import Data.Functor ((<&>))
 import qualified Data.Text as T
-
-magicCookie :: BS.StrictByteString
-magicCookie = BS.pack [0x21, 0x12, 0xa4, 0x42]
-
-bindRequest :: BS.StrictByteString
-bindRequest = BS.pack [0x00, 0x01]
-
-bindSuccess :: BS.StrictByteString
-bindSuccess = BS.pack [0x01, 0x01]
-
-bindError :: BS.StrictByteString
-bindError = BS.pack [0x01, 0x11]
-
-stunBindRequest :: Word8 -> BS.StrictByteString
-stunBindRequest len = bindRequest <> BS.pack [0x00, len] <> magicCookie <>
-    BS.pack [0x53, 0x4f, 0x70, 0x43, 0x69, 0x69, 0x35, 0x4a, 0x66, 0x63, 0x31, 0x7a]
+import Network.STUN.BinaryUtils
 
 stunBindRequestInvalidMagicCookie :: BS.StrictByteString
 stunBindRequestInvalidMagicCookie = bindRequest <> BS.pack [0x00, 0x00]
     <> BS.pack [0x21, 0x12, 0xa5, 0x42] <>
     BS.pack [0x53, 0x4f, 0x70, 0x43, 0x69, 0x69, 0x35, 0x4a, 0x66, 0x63, 0x31, 0x7a]
-
-stunBindSuccessResponse :: Word8 -> BS.StrictByteString
-stunBindSuccessResponse len = bindSuccess <> BS.pack [0x00, len] <> magicCookie <>
-    BS.pack [0x53, 0x4f, 0x70, 0x43, 0x69, 0x69, 0x35, 0x4a, 0x66, 0x63, 0x31, 0x7a]
-
-stunBindErrorResponse :: Word8 -> BS.StrictByteString
-stunBindErrorResponse len = bindError <> BS.pack [0x00, len] <> magicCookie <>
-    BS.pack [0x53, 0x4f, 0x70, 0x43, 0x69, 0x69, 0x35, 0x4a, 0x66, 0x63, 0x31, 0x7a]
-
-errorCode500Attribute :: BS.StrictByteString
-errorCode500Attribute = BS.pack [0x00, 0x09, 0x00, 0x10, 0x00, 0x00, 0x05, 0x00, 0x53, 0x45, 0x52, 0x56, 0x45, 0x52, 0x20, 0x45, 0x52, 0x52, 0x4f, 0x52]
-
-errorCode420Attribute :: BS.StrictByteString
-errorCode420Attribute = BS.pack [0x00, 0x09, 0x00, 0x04, 0x00, 0x00, 0x04, 0x14]
-
-mappedAddressAttribute :: BS.StrictByteString
-mappedAddressAttribute = BS.pack [0x00, 0x01, 0x00, 0x08, 0x00, 0x01, 0x11, 0xfc, 0x46, 0xc7, 0x80, 0x2e]
-
-xorMappedAddressAttribute :: BS.StrictByteString
-xorMappedAddressAttribute = BS.pack [0x00, 0x20, 0x00, 0x14, 0x00, 0x02, 0x11, 0xfc, 0x46, 0xc7, 0x80, 0x2e, 0x46, 0xc7, 0x80, 0x2e, 0x46, 0xc7, 0x80, 0x2e, 0x46, 0x2e, 0xc7, 0x80]
 
 newtype ArbitraryAttribute = Attr {unwrap :: Types.Attribute}
     deriving (Eq, Show)
@@ -68,7 +32,6 @@ instance Arbitrary ArbitraryAttribute where
               pure $ ctor addr
           errorCodeGen = Types.ErrorCode <$> arbitraryBoundedEnum <*> (arbitrary <&> T.pack)
           unknownAttributesGen = Types.UnknownAttributes <$> listOf1 (choose (0x021, 0x7FFF))
-
 
 newtype ArbitraryMessage = Msg Types.Message
     deriving (Eq, Show)
