@@ -47,6 +47,8 @@ library
     , cereal
     , containers
     , mtl
+    , monad-logger
+    , fast-logger
   default-language: Haskell2010
 
 executable stun-hs-exe

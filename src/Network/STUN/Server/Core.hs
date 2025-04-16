@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Network.STUN.Server.Core
     (run)
@@ -17,12 +18,25 @@ import qualified Network.Socket as NS
 import Data.Maybe (mapMaybe)
 import Data.Word (Word16)
 
-import Control.Monad (forever, void)
+import Control.Monad (forever, void, when)
 import Control.Exception (bracket)
 import Control.Monad.Reader (ReaderT, liftIO, ask, runReaderT, MonadIO, MonadReader)
+import qualified Control.Monad.Logger  as ML
 
 newtype AppM a = AppM { runApp :: ReaderT E.Env IO a}
     deriving (Functor, Applicative, Monad, MonadIO, MonadReader E.Env)
+
+instance ML.MonadLogger AppM where
+    monadLoggerLog loc _ level msg = do
+        env <- ask
+        when (level >= env.logLvl) $ do
+            liftIO $ fst env.logger $ \time ->
+                ML.toLogStr time <> " " <>
+                ML.toLogStr ("[" ++ show level ++ "] ") <>
+                ML.toLogStr (ML.loc_module loc) <>
+                ML.toLogStr (": " :: String) <>
+                ML.toLogStr msg <>
+                ML.toLogStr ("\n" :: String)
 
 run :: E.Env -> IO ()
 run = runReaderT (runApp stunServer)
@@ -31,6 +45,7 @@ stunServer :: AppM ()
 stunServer = do
   env <- ask
   let sock = env.udpSocketConfig 
+  $(ML.logInfo) "Starting server"
   liftIO $ bracket
     sock.open
     sock.close
