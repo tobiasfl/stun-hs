@@ -19,12 +19,12 @@ import Data.Maybe (mapMaybe)
 import Data.Word (Word16)
 
 import Control.Monad (forever, void, when)
-import Control.Exception (bracket)
 import Control.Monad.Reader (ReaderT, liftIO, ask, runReaderT, MonadIO, MonadReader)
 import qualified Control.Monad.Logger  as ML
+import Control.Monad.Catch (MonadCatch, MonadThrow, MonadMask, bracket)
 
 newtype AppM a = AppM { runApp :: ReaderT E.Env IO a}
-    deriving (Functor, Applicative, Monad, MonadIO, MonadReader E.Env)
+    deriving (Functor, Applicative, Monad, MonadIO, MonadReader E.Env, MonadThrow, MonadCatch, MonadMask)
 
 instance ML.MonadLogger AppM where
     monadLoggerLog loc _ level msg = do
@@ -46,17 +46,18 @@ stunServer = do
   env <- ask
   let sock = env.udpSocketConfig 
   $(ML.logInfo) "Starting server"
-  liftIO $ bracket
-    sock.open
-    sock.close
+  bracket
+    (liftIO sock.open)
+    (liftIO . sock.close)
     (\openSocket -> do
-      env.serverConfig.onReady
+      liftIO env.serverConfig.onReady
       void $ forever $ do
-        (msgOrErr, clientAddr) <- sock.receiveMsg openSocket
-        msg <- either (fail . show) pure msgOrErr
-        let responseMaybe = processStunMessage (msg, clientAddr)
-        maybe (pure ()) (sock.sendMsg openSocket clientAddr) responseMaybe)
-
+        (msgOrErr, clientAddr) <- liftIO $ sock.receiveMsg openSocket
+        case msgOrErr of
+          Right msg -> do
+            let responseMaybe = processStunMessage (msg, clientAddr)
+            liftIO $ maybe (pure ()) (sock.sendMsg openSocket clientAddr) responseMaybe
+          Left err -> $(ML.logWarnSH) ("Failed to parse received messsage:" ++ err))
 
 processStunMessage :: (Message, NS.SockAddr) -> Maybe Message
 processStunMessage (msg, clientAddr)
