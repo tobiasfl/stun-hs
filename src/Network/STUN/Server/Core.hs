@@ -55,15 +55,17 @@ stunServer = do
         (msgOrErr, clientAddr) <- liftIO $ sock.receiveMsg openSocket
         case msgOrErr of
           Right msg -> do
-            let responseMaybe = processStunMessage (msg, clientAddr)
+            $(ML.logDebugSH) ("Handling received message:" ++ show msg)
+            let responseMaybe =  processStunMessage (msg, clientAddr)
             liftIO $ maybe (pure ()) (sock.sendMsg openSocket clientAddr) responseMaybe
           Left err -> $(ML.logWarnSH) ("Failed to parse received messsage:" ++ err))
 
 processStunMessage :: (Message, NS.SockAddr) -> Maybe Message
 processStunMessage (msg, clientAddr)
   | any isUnknown $ T.attributes msg = Just $ T.mkMessage T.BindingErrorResponse tid [T.ErrorCode T.UnknownAttribute420 "UNKNOWN ATTRIBUTE", T.UnknownAttributes (getUnknownAttributeTypes msg)]
-  | otherwise = case (T.msgType msg, T.mkAddress clientAddr) of
-                           (T.BindingRequest, Just addr) -> Just $ T.mkMessage T.BindingSuccessResponse tid [T.mkXORMappedAddress $ B.xorAddress tid addr]
+  | otherwise = case (T.msgType msg, T.isClassic msg, T.mkAddress clientAddr) of
+                           (T.BindingRequest, False, Just addr) -> Just $ T.mkMessage T.BindingSuccessResponse tid [T.mkXORMappedAddress $ B.xorAddress tid addr]
+                           (T.BindingRequest, True, Just addr) -> Just $ T.mkClassicMessage T.BindingSuccessResponse tid [T.mkMappedAddress addr]
                            _ -> Nothing
                         where tid = T.transactionId msg
 

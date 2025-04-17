@@ -1,9 +1,11 @@
 module Network.STUN.Types
     (Message
     , mkMessage
+    , mkClassicMessage
     , msgType
     , transactionId
     , attributes
+    , isClassic
     , MessageType(..)
     , TransactionId(..)
     , Address(..)
@@ -87,8 +89,12 @@ data Message = Message
     { msgType :: MessageType
     , transactionId :: TransactionId
     , attributes :: [Attribute]
+    , isClassic :: Bool
     }
     deriving (Eq, Show)
 
 mkMessage :: MessageType -> TransactionId -> [Attribute] -> Message
-mkMessage = Message
+mkMessage mType tid attrs = Message mType tid attrs False
+
+mkClassicMessage :: MessageType -> TransactionId -> [Attribute] -> Message
+mkClassicMessage mType tid attrs = Message mType tid attrs True

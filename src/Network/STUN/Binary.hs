@@ -50,6 +50,23 @@ import qualified Data.Text.Encoding as TE
 --     |                         Value (variable)                ....
 --     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 --     STUN Attributes
+--
+-- "Classic STUN"
+-- https://datatracker.ietf.org/doc/html/rfc3489
+--    0                   1                   2                   3
+--    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+--   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+--   |      STUN Message Type        |         Message Length        |
+--   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+--   |
+--   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+--
+--   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+--                            Transaction ID
+--   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+--                                                                   |
+--   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+--   Classic STUN Message Header
 
 data ClassField = Request | Indication | SuccessResponse | ErrorResponse
     deriving (Eq, Show)
@@ -197,14 +214,14 @@ attributeToByteString mappedAddr = case mappedAddr of
                                      (Types.UnknownComprehensionRequired _) -> BS.empty
                                  where lenAndBody addr = let val = addressToByteString addr in w16ToBSBE (fromIntegral (BS.length val)) <> val
 
-data Message = Message Types.MessageType Types.TransactionId [Types.Attribute]
+data Message = Message Types.MessageType Types.TransactionId [Types.Attribute] Bool
 
 instance Serialize Message where
-    put (Message msgType (Types.TransactionId tid) attributes) = do
+    put (Message msgType (Types.TransactionId tid) attributes isClassic) = do
         putMessageTypeField msgType
         let attributesBytesTring = BS.concat $ fmap (addPadding . attributeToByteString) attributes
         putWord16be $ fromIntegral $ BS.length attributesBytesTring
-        putWord32be magicCookie
+        unless isClassic $ putWord32be magicCookie
         putByteString tid
         putByteString attributesBytesTring
 
@@ -217,13 +234,14 @@ instance Serialize Message where
                         (Indication, Binding) -> fail "Binding indication not implemented"
         msgLength <- fromIntegral <$> getWord16be
         when (((msgLength `mod` 4) :: Int) /= 0) $ fail "Message length not 32-bit aligned"
-        cookie <- getWord32be
-        when (cookie /= magicCookie) $ fail "Invalid magic cookie"
-        tid <- getByteString 12
+        cookie <- lookAhead getWord32be
+        let isClassicSTUN = cookie /= magicCookie
+        unless isClassicSTUN (skip 4)
+        tid <- getByteString (if isClassicSTUN then 16 else 12)
         remainingByteLen <- remaining
         when (remainingByteLen /= msgLength) $ fail "Invalid length"
         attributes <- getAttributesUntilEnd [] remainingByteLen
-        pure $ Message msgType (Types.TransactionId tid) (reverse attributes)
+        pure $ Message msgType (Types.TransactionId tid) (reverse attributes) isClassicSTUN
             where getAttributesUntilEnd attrs remainingBytes
                     | remainingBytes > 0 = do
                         a <- getAttribute
@@ -234,10 +252,10 @@ instance Serialize Message where
 
 
 serializeMessage :: Types.Message -> BS.StrictByteString
-serializeMessage msg = encode ((Message <$> Types.msgType <*> Types.transactionId <*> Types.attributes) msg)
+serializeMessage msg = encode ((Message <$> Types.msgType <*> Types.transactionId <*> Types.attributes <*> Types.isClassic) msg)
 
 deserializeMessage :: BS.StrictByteString -> Either String Types.Message
-deserializeMessage bs = decode bs >>= \(Message msgType tid attrs) -> pure $ Types.mkMessage msgType tid attrs
+deserializeMessage bs = decode bs >>= \(Message msgType tid attrs isClassic) -> pure $ (if isClassic then Types.mkClassicMessage else Types.mkMessage) msgType tid attrs
 
 xorPortNumber :: PortNumber -> PortNumber
 xorPortNumber port = fromIntegral $ toInteger port `xor` (toInteger magicCookie `shiftR` 16)

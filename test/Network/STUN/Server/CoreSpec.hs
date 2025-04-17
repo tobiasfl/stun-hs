@@ -68,3 +68,17 @@ spec = do
 
           let expectedResponse = T.mkMessage T.BindingErrorResponse tid expectedResponsAttr
           response `shouldBe` Right expectedResponse
+      context "When client is using CLASSIC STUN" $ do
+        it "Responds with MappedAddress to a plain bind request" $ do
+          (response, NS.SockAddrInet clientPort clientHostAddr) <- withUDPSocketDo $ \clientSock -> do
+              NS.bind clientSock $ NS.SockAddrInet NS.defaultPort Sock.loopbackAddr
+              SB.sendAllTo clientSock classicStunBindRequest serverSockAddr
+              clientAddr <- NS.getSocketName clientSock
+
+              response <- Bin.deserializeMessage <$> SB.recv clientSock 1500
+              pure (response, clientAddr)
+
+          let tid = T.TransactionId $ BS.pack [0x02, 0x90, 0x0a, 0x4c, 0x1d, 0x4f, 0xb6, 0x5e, 0x15, 0x8f, 0xd0, 0x3b, 0x8e, 0xc6, 0x89, 0x6a]
+          let expectedResponsAttr = T.mkMappedAddress $ T.mkIPv4Address clientPort clientHostAddr
+          let expectedResponse = T.mkClassicMessage T.BindingSuccessResponse tid [expectedResponsAttr]
+          response `shouldBe` Right expectedResponse

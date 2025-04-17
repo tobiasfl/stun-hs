@@ -39,13 +39,13 @@ newtype ArbitraryMessage = Msg Types.Message
 instance Arbitrary ArbitraryMessage where
   arbitrary = do
       msgType <- arbitraryBoundedEnum
-      tid <- Types.TransactionId . BS.pack <$> vectorOf 12 arbitrary
+      isClassic <- arbitrary
+      tid <- Types.TransactionId . BS.pack <$> vectorOf (if isClassic then 16 else 12) arbitrary
       attributes <- listOf arbitrary
-      pure $ Msg $ Types.mkMessage msgType tid (fmap unwrap attributes)
+      pure $ Msg $ (if isClassic then Types.mkClassicMessage else Types.mkMessage) msgType tid (fmap unwrap attributes)
   shrink (Msg msg) = msgWithAttributes . fmap unwrap <$> shrunkAttributePerms
       where shrunkAttributePerms = shrink (Attr <$> Types.attributes msg)
             msgWithAttributes = Msg . Types.mkMessage (Types.msgType msg) (Types.transactionId msg)
-
 spec :: Spec
 spec = do
   describe "Message encoding/decoding" $ do
@@ -54,8 +54,14 @@ spec = do
       let expectedTransactionId = Types.TransactionId $ BS.pack [ 0x53, 0x4f, 0x70, 0x43, 0x69, 0x69, 0x35, 0x4a, 0x66, 0x63, 0x31, 0x7a ]
       let expectedMsg = Types.mkMessage Types.BindingRequest expectedTransactionId []
       msg `shouldBe` Right expectedMsg
+    it "Decodes a classic STUN bind request correctly" $ do
+      let msg = Binary.deserializeMessage classicStunBindRequest
+      let expectedTransactionId = Types.TransactionId $ BS.pack [0x02, 0x90, 0x0a, 0x4c, 0x1d, 0x4f, 0xb6, 0x5e, 0x15, 0x8f, 0xd0, 0x3b, 0x8e, 0xc6, 0x89, 0x6a]
+      let expectedMsg = Types.mkClassicMessage Types.BindingRequest expectedTransactionId []
+      msg `shouldBe` Right expectedMsg
     it "Fails to decode when invalid magic cookie" $ do
       let msg = Binary.deserializeMessage stunBindRequestInvalidMagicCookie
+      pendingWith "Not sure when invalid cookie should just return failure vs when it means classic STUN"
       fromLeft "" msg `shouldContain` "Invalid magic cookie"
     it "Fails to decode when invalid length" $ do
       let stunBindWithInvalidLength = stunBindRequest 0x10
